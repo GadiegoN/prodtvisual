@@ -16,7 +16,7 @@ npm run dev
 
 ## SaaS local setup
 
-The browser-based, local-first workflow remains available without an account. To enable accounts and server-side workspaces:
+The current deployment is local-first; login, account creation, and cloud workspace access are disabled in the interface. The API and account implementation are retained. To run the SaaS backend locally when re-enabled:
 
 1. Create a PostgreSQL database and copy `.env.example` to `.env`.
 2. Set `DATABASE_URL` and generate an `AUTH_SECRET` with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`.
@@ -39,13 +39,17 @@ npm run build
 - Automatic profiles for numeric, categorical, text, boolean, date, and date-time columns; detected types can be corrected.
 - Recommendations for comparisons, trends, proportions, distributions, relationships, and statistical summaries.
 - Interactive chart editing, aggregation, sorting, Top N, Brazilian number formats, and equality, range, and text filters.
-- Local projects with save, reopen, duplicate, rename, delete, and a multi-chart dashboard with reordering and card resizing.
+- Local projects with save, reopen, duplicate, rename, delete, and a multi-chart dashboard with reordering and card resizing. Projects are stored in IndexedDB, with automatic migration from older browser storage and a three-project limit per browser.
+- JSON backups up to 100 MB to download and restore projects between browsers; restoration validates the backup and never partially imports when the project limit would be exceeded.
+- Installable offline app shell on production builds. After the first online visit has completed caching, the interface can reopen offline; the local editor and saved projects remain on that device.
 - Export filtered data as CSV, charts as SVG/PNG, and browser print-to-PDF. CSV cells that could be interpreted as spreadsheet formulas are escaped on export.
 - Portuguese-first interface with a locale selector and a separate message catalog for localization.
 
 ## Data and sharing
 
-Without cloud mode, projects are stored in this browser's `localStorage`; clearing browser data removes them. No account or server is required. With cloud mode, projects, datasets, and visualizations are stored in the selected PostgreSQL-backed organization.
+The offline, local-first app works without an account or server. Projects are stored in this browser's IndexedDB; clearing site data or using another browser/device removes or does not include them. Use **Meus projetos → Baixar backup** to keep a portable JSON copy and **Restaurar backup** to bring it back. The browser-local project limit is three. Offline app files are cached after the first successful online load; opening the app offline does not make the initial download work without a connection.
+
+With cloud mode, projects, datasets, and visualizations are stored in the selected PostgreSQL-backed organization.
 
 Local sharing copies a URL-encoded snapshot into the link fragment. Cloud sharing uses a revocable opaque token; the dataset is not embedded in the URL. Anyone who has an active cloud share link can view its project until it is revoked or expires.
 

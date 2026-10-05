@@ -2,9 +2,9 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, ClipboardEvent } from 'react'
 import {
   ArrowDownWideNarrow, ArrowLeft, BarChart3, Check, ChevronDown, CircleHelp, Copy, Database,
-  Download, FileDown, FileSpreadsheet, Filter, FolderOpen, Grid2X2, LineChart,
+  Download, FileDown, FileSpreadsheet, Filter, FolderOpen, Grid2X2, HardDrive, LineChart,
   LoaderCircle, Moon, MoreHorizontal, Plus, Save, Search, Share2, Sparkles, Sun, Table2, Trash2, Upload, UserRound,
-  X,
+  WifiOff, X,
 } from 'lucide-react'
 import { analyzeDataset, inferDataset, isNumericType, parseNumber } from '../domain/dataset'
 import type { ColumnType, Dataset, DatasetColumn } from '../domain/dataset'
@@ -12,7 +12,10 @@ import { recommendVisualizations } from '../domain/recommendations'
 import { calculateStatistics } from '../domain/statistics'
 import { defaultVisualization, filteredRows, groupedData } from '../domain/visualization'
 import type { Aggregation, DataFilter, FilterOperator, VisualizationConfig } from '../domain/visualization'
-import { deleteProject, listProjects, MAX_LOCAL_PROJECTS, saveProject } from '../infrastructure/projects'
+import {
+  createProjectsBackup, deleteProject, estimateBrowserStorage, listProjects, MAX_LOCAL_PROJECTS,
+  parseProjectsBackup, restoreProjects, saveProject,
+} from '../infrastructure/projects'
 import type { Project } from '../infrastructure/projects'
 import { exportCsv as serializeCsv } from '../infrastructure/csvExport'
 import { importFile } from '../infrastructure/fileImport'
@@ -29,6 +32,11 @@ import type { Locale } from './messages'
 type Screen = 'workspace' | 'dashboard' | 'projects'
 const ChartView = lazy(() => import('./ChartView').then((module) => ({ default: module.ChartView })))
 const ACCOUNT_ACCESS_ENABLED = false
+const MAX_BACKUP_BYTES = 100 * 1024 * 1024
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
 
 const typeLabels: Record<ColumnType, string> = {
   text: 'Texto', category: 'Categoria', integer: 'Inteiro', decimal: 'Decimal',
@@ -77,6 +85,11 @@ function exampleDataset(): Dataset {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 }).format(value)
+}
+
+function formatStorageSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB`
 }
 
 function createProject(dataset: Dataset, name = 'Projeto sem título'): Project {
@@ -157,7 +170,11 @@ function App() {
   const [showImport, setShowImport] = useState(false)
   const [search, setSearch] = useState('')
   const [saving, setSaving] = useState(false)
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null)
+  const [storageEstimate, setStorageEstimate] = useState<{ usage?: number; quota?: number }>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const backupFileRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const savedProjectIds = useRef(new Set<string>())
   const cloudProjectIds = useRef(new Set<string>())
@@ -173,6 +190,30 @@ function App() {
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
+  useEffect(() => {
+    const setOnline = () => setIsOnline(true)
+    const setOffline = () => setIsOnline(false)
+    const captureInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPrompt(event as InstallPromptEvent)
+    }
+    window.addEventListener('online', setOnline)
+    window.addEventListener('offline', setOffline)
+    window.addEventListener('beforeinstallprompt', captureInstallPrompt)
+    return () => {
+      window.removeEventListener('online', setOnline)
+      window.removeEventListener('offline', setOffline)
+      window.removeEventListener('beforeinstallprompt', captureInstallPrompt)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (screen !== 'projects') return
+    void estimateBrowserStorage().then(setStorageEstimate).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : 'Não foi possível consultar o espaço local disponível.')
+    })
+  }, [localProjects, screen])
+
   const profile = useMemo(() => analyzeDataset(project.dataset), [project.dataset])
   const suggestions = useMemo(() => recommendVisualizations(project.dataset, profile), [project.dataset, profile])
   const selectedChart = project.charts.find((chart) => chart.id === selectedChartId) ?? project.charts[0]
@@ -187,14 +228,13 @@ function App() {
   const currentGroups = useMemo(() => selectedChart ? groupedData(project.dataset, currentRows, selectedChart) : [], [project.dataset, selectedChart])
 
   useEffect(() => {
-    try {
-      const saved = listProjects()
+    void listProjects().then((saved) => {
       saved.forEach((item) => savedProjectIds.current.add(item.id))
       setLocalProjects(saved)
       setProjects(saved)
-    } catch (cause) {
+    }).catch((cause) => {
       setError(cause instanceof Error ? cause.message : 'Não foi possível abrir seus projetos.')
-    }
+    })
 
     const sharedToken = location.hash.startsWith('#shared=') ? location.hash.slice(8) : ''
     if (sharedToken) {
@@ -264,13 +304,12 @@ function App() {
   useEffect(() => {
     if (sharedReadOnly || !savedProjectIds.current.has(project.id)) return
     const timeout = window.setTimeout(() => {
-      try {
-        const next = saveProject({ ...project, updatedAt: new Date().toISOString() })
+      void saveProject({ ...project, updatedAt: new Date().toISOString() }).then((next) => {
         setProjects(next)
         setLocalProjects(next)
-      } catch (cause) {
+      }).catch((cause) => {
         setError(cause instanceof Error ? cause.message : 'Não foi possível salvar as alterações.')
-      }
+      })
     }, 450)
     return () => window.clearTimeout(timeout)
   }, [project])
@@ -298,6 +337,62 @@ function App() {
     setActiveTab(dataset.rows.length ? 'visualize' : 'data')
     setError('')
     if (dataset.rows.length) createSuggestedChart(next, recommendVisualizations(dataset, analyzeDataset(dataset)))
+  }
+
+  function downloadBackup() {
+    try {
+      if (!localProjects.length) throw new Error('Ainda não há projetos salvos para incluir no backup.')
+      const backup = createProjectsBackup(localProjects)
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
+      if (blob.size > MAX_BACKUP_BYTES) throw new Error('Este backup excede 100 MB. Remova dados ou divida os projetos antes de exportar.')
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `vista-backup-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.append(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setNotice(`Backup criado com ${localProjects.length} projeto(s).`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Não foi possível criar o backup.')
+    }
+  }
+
+  async function restoreBackupFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (file.size > MAX_BACKUP_BYTES) {
+      setError('O backup excede o limite de 100 MB para restauração.')
+      return
+    }
+    try {
+      const backup = parseProjectsBackup(JSON.parse(await file.text()) as unknown)
+      const replaceExisting = localProjects.length === 0 || window.confirm(
+        'Deseja substituir os projetos atuais pelos do backup? Se cancelar, o Vista tentará mesclar os projetos sem apagar os atuais.',
+      )
+      const restored = await restoreProjects(backup.projects, replaceExisting)
+      savedProjectIds.current = new Set(restored.map((item) => item.id))
+      setLocalProjects(restored)
+      setProjects(restored)
+      setCloudMode(false)
+      localStorage.setItem('vista.storage-mode.v1', 'local')
+      const restoredCurrent = restored.find((item) => item.id === project.id)
+      if (restoredCurrent) setProject(restoredCurrent)
+      else if (replaceExisting && restored.length) openProject(restored[0])
+      setNotice(`${backup.projects.length} projeto(s) restaurado(s) do backup.`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Não foi possível restaurar este backup.')
+    }
+  }
+
+  async function installApp() {
+    if (!installPrompt) return
+    await installPrompt.prompt()
+    const result = await installPrompt.userChoice
+    if (result.outcome === 'accepted') setNotice('Vista instalado neste dispositivo.')
+    setInstallPrompt(null)
   }
 
   function createSuggestedChart(base: Project, items = suggestions) {
@@ -437,7 +532,7 @@ function App() {
     patchChart({ filters: selectedChart.filters.map((filter) => filter.id === id ? { ...filter, ...patch } : filter) })
   }
 
-  function saveCurrentProject() {
+  async function saveCurrentProject() {
     if (sharedReadOnly) return
     setSaving(true)
     if (cloudMode && activeOrganizationId) {
@@ -456,9 +551,9 @@ function App() {
       return
     }
     try {
-      const next = saveProject({ ...project, name: project.name.trim() || 'Projeto sem título', updatedAt: new Date().toISOString() })
+      const next = await saveProject({ ...project, name: project.name.trim() || 'Projeto sem título', updatedAt: new Date().toISOString() })
       savedProjectIds.current.add(project.id)
-      setLocalProjects(listProjects())
+      setLocalProjects(next)
       setProjects(next)
       setProject((current) => ({ ...current, name: current.name.trim() || 'Projeto sem título' }))
       clearSharedHash()
@@ -509,7 +604,9 @@ function App() {
       setCloudMode(true)
       localStorage.setItem('vista.storage-mode.v1', 'cloud')
     } else {
-      setProjects(listProjects())
+      const local = await listProjects()
+      setLocalProjects(local)
+      setProjects(local)
       setCloudMode(false)
       localStorage.setItem('vista.storage-mode.v1', 'local')
     }
@@ -551,7 +648,7 @@ function App() {
     setCloudMode(false)
     cloudProjectIds.current.clear()
     localStorage.removeItem('vista.storage-mode.v1')
-    const saved = listProjects()
+    const saved = await listProjects()
     setLocalProjects(saved)
     setProjects(saved)
   }
@@ -566,7 +663,7 @@ function App() {
     setError('')
   }
 
-  function duplicateProject(item: Project) {
+  async function duplicateProject(item: Project) {
     const duplicate = { ...item, id: crypto.randomUUID(), name: `${item.name} — cópia`, updatedAt: new Date().toISOString() }
     if (cloudMode && activeOrganizationId) {
       void createOrganizationProject(duplicate, activeOrganizationId).then(({ project: saved }) => {
@@ -577,9 +674,9 @@ function App() {
       return
     }
     try {
-      const next = saveProject(duplicate)
+      const next = await saveProject(duplicate)
       savedProjectIds.current.add(duplicate.id)
-      setLocalProjects(listProjects())
+      setLocalProjects(next)
       setProjects(next)
       setNotice('Uma cópia do projeto foi criada.')
     } catch (cause) {
@@ -587,7 +684,7 @@ function App() {
     }
   }
 
-  function removeProject(id: string) {
+  async function removeProject(id: string) {
     if (sharedReadOnly) return
     if (!window.confirm('Excluir este projeto salvo? Esta ação não pode ser desfeita.')) return
     if (cloudMode && cloudProjectIds.current.has(id) && activeOrganizationId) {
@@ -599,7 +696,7 @@ function App() {
       return
     }
     try {
-      const next = deleteProject(id)
+      const next = await deleteProject(id)
       setLocalProjects(next)
       setProjects(next)
       if (project.id === id) startNew()
@@ -821,6 +918,7 @@ function App() {
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
             <span>{theme === 'dark' ? 'Claro' : 'Escuro'}</span>
           </button>
+          {installPrompt && <button className="button button-quiet button-small install-app-button" onClick={() => void installApp()}><Download size={15} /><span>Instalar</span></button>}
           {ACCOUNT_ACCESS_ENABLED && <button className="button button-quiet button-small" onClick={() => setAccountOpen(true)}><UserRound size={15} /><span>{session?.user ? 'Conta' : 'Entrar'}</span></button>}
           {!sharedReadOnly && <button className="button button-quiet button-small" onClick={shareProject} title="Criar link de compartilhamento"><Share2 size={15} /><span>Compartilhar</span></button>}
           {!sharedReadOnly && <button className="button button-primary button-small" onClick={saveCurrentProject} disabled={saving || !project.dataset.columns.length} title={!cloudMode && !savedProjectIds.current.has(project.id) && localProjects.length >= MAX_LOCAL_PROJECTS ? `Limite de ${MAX_LOCAL_PROJECTS} projetos por navegador` : undefined}><Save size={15} />{saving ? 'Salvando…' : t('save')}</button>}
@@ -828,10 +926,11 @@ function App() {
         </div>
       </header>
 
+      {!isOnline && <div className="offline-banner" role="status"><WifiOff size={15} /><span>Sem conexão. O Vista continua disponível com os arquivos já carregados; seus projetos permanecem salvos neste navegador.</span></div>}
       {(error || notice) && <div className={`toast ${error ? 'toast-error' : 'toast-success'}`} role={error ? 'alert' : 'status'}><span>{error || notice}</span><button onClick={() => { setError(''); setNotice('') }} aria-label="Fechar aviso"><X size={15} /></button></div>}
 
       {screen === 'projects' ? <section className="page-content projects-page">
-        <div className="page-heading"><div><div className="eyebrow">SUA BIBLIOTECA</div><h1>Seus projetos</h1><p>Retome suas análises de onde parou.</p><p className="local-project-limit">Projetos neste navegador: {localProjects.length}/{MAX_LOCAL_PROJECTS}.</p></div><button className="button button-primary" onClick={() => startNew()}><Plus size={17} />{t('createNew')}</button></div>
+        <div className="page-heading"><div><div className="eyebrow">SUA BIBLIOTECA</div><h1>Seus projetos</h1><p>Retome suas análises de onde parou.</p><p className="local-project-limit">Projetos neste navegador: {localProjects.length}/{MAX_LOCAL_PROJECTS}. Eles ficam salvos apenas neste navegador; crie backups para transferir ou proteger seus dados.</p>{storageEstimate.quota !== undefined && <p className="local-storage-usage"><HardDrive size={13} /> Uso estimado pelo site: {formatStorageSize(storageEstimate.usage ?? 0)} (cota informada pelo navegador: {formatStorageSize(storageEstimate.quota)}).</p>}</div><div className="project-heading-actions"><button className="button button-secondary" onClick={downloadBackup} disabled={!localProjects.length}><Download size={15} />Baixar backup</button><button className="button button-secondary" onClick={() => backupFileRef.current?.click()}><Upload size={15} />Restaurar backup</button><input ref={backupFileRef} type="file" accept=".json,application/json" hidden onChange={(event) => void restoreBackupFile(event)} /><button className="button button-primary" onClick={() => startNew()}><Plus size={17} />{t('createNew')}</button></div></div>
         <div className="project-search"><Search size={16} /><input aria-label="Buscar projetos" placeholder="Buscar projetos..." value={search} onChange={(event) => setSearch(event.target.value)} /></div>
         {displayedProjects.length ? <div className="project-grid">{displayedProjects.map((item) => <article className="project-card" key={item.id}>
           <button className="project-card-main" onClick={() => openProject(item)}><div className="project-preview"><div className="preview-bars"><i /><i /><i /><i /><i /><i /></div><div className="preview-line" /></div><div className="project-card-body"><div className="project-card-icon"><BarChart3 size={16} /></div><div className="project-card-title"><strong>{item.name}</strong><span>{item.dataset.rows.length} linhas · {item.dataset.columns.length} colunas</span></div><span className="project-card-date">{new Date(item.updatedAt).toLocaleDateString('pt-BR')}</span></div></button>

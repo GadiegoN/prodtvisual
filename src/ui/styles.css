@@ -820,3 +820,20 @@ html[data-theme="dark"] .theme-toggle {
 html[data-theme="dark"] :is(input, textarea, select, button, [tabindex]):focus-visible {
   outline-color: #8a83ff;
 }
+
+.offline-banner { display: flex; align-items: center; gap: 8px; padding: 9px 34px; border-bottom: 1px solid #ead8a9; color: #76591e; background: #fff8e7; font-size: 10px; line-height: 1.5; }
+.offline-banner svg { flex: 0 0 auto; }
+.project-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.local-project-limit { max-width: 660px; margin-top: 7px !important; }
+.local-storage-usage { display: flex; align-items: center; gap: 5px; color: #858898; }
+.local-storage-usage svg { flex: 0 0 auto; }
+html[data-theme="dark"] .offline-banner { border-color: #5e4c29; color: #f1d894; background: #302919; }
+html[data-theme="dark"] .local-project-limit,
+html[data-theme="dark"] .local-storage-usage { color: var(--theme-muted); }
+
+@media (max-width: 650px) {
+  .offline-banner { padding: 8px 12px; font-size: 9px; }
+  .page-heading .project-heading-actions { width: 100%; }
+  .project-heading-actions .button { flex: 1; padding: 8px 6px; font-size: 9px; }
+  .project-heading-actions .button svg { width: 13px; height: 13px; }
+}
